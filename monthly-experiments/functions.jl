@@ -2,7 +2,7 @@ function initialize_load_parameters(simulation_time_days, timestep_hours, load_p
     number_of_loads = 4;
     number_of_timesteps = floor(Int,simulation_time_days*24/timestep_hours);
     # Read load data file
-    load_data = CSV.read(pwd()*"\\..\\datasets\\cleanData-357days.csv",DataFrame);
+    load_data = CSV.read(pwd()*"\\..\\datasets\\monthly-experiment-data.csv",DataFrame);
 
     # Extract required data 
     lb = (start_day - 1)*floor(Int,24/timestep_hours) + 1;; # lower bound
