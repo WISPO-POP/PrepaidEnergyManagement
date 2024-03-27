@@ -1,7 +1,7 @@
 # Prepaid Energy Management
 
 [Optimal Energy Rationing for Prepaid Electricity Customers](https://ieeexplore.ieee.org/abstract/document/10202907)   
-Maitreyee Marathe, Prof. Line Roald   
+[Maitreyee Marathe](mmarathe@wisc.edu), Prof. Line Roald   
 University of Wisconsin-Madison
 
 * datasets - used to store data for experiments.
