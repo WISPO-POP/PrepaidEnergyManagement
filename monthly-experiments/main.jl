@@ -20,7 +20,7 @@ function main()
     simulation_data_number = 0;
     model_data_number = 1;
     # Type of model
-    model_number = 1; # 0 - detailed model, 1 - variable recharge model (assumes average data), 2 - full-fledged home energy manager, 3 = detailed model with variable virtual recharge
+    model_number = 1; # 0 - detailed forecast MILP (DFM), 1 - average forecast model solved using solver, 2 - optimal benchmark MILP (OBM), 4 - average forecast greeedy (AFG) model
     threshold_constant_days = 1;
     load_priority_order = [2;4;3;1];
     start_day = 1;
@@ -31,7 +31,7 @@ function main()
     # Add real recharge amount in percent
     recharge_percent_array = [70,80,90,100];    
     experiment_parameters = Dict("total_time_days"=> total_time_days, "timestep_hours"=>timestep_hours, "simulation_data_number"=>simulation_data_number,"model_data_number"=>model_data_number,"model_number"=>model_number,"threshold_constant_days"=>threshold_constant_days,"load_priority_order"=>load_priority_order,"start_day"=>start_day,"case_array"=>case_array,"real_recharge_logic_array"=>real_recharge_logic_array,"recharge_percent_array"=>recharge_percent_array)    
-    if model_number == 0 || model_number == 1 || model_number == 3
+    if model_number == 0 || model_number == 1 || model_number == 3 || model_number == 4
         time_array, simulation_results, model_results, parameters = run_threshold_model_simulation(experiment_parameters);
     elseif model_number == 2
         run_hem_model_simulation(experiment_parameters);        
@@ -234,6 +234,8 @@ function run_threshold_model_simulation(experiment_parameters)
         update_time_days = 30
     elseif model_number == 3
         update_time_days = 30
+    elseif model_number == 4
+        update_time_days = 30
     end  
     update_start_days = zeros(Int,ceil(Int,simulation_time_days/update_time_days),1);
     update_start_timesteps = zeros(Int, ceil(Int,simulation_time_days/update_time_days),1);
@@ -324,6 +326,8 @@ function run_threshold_model_simulation(experiment_parameters)
                     virtual_wallet_thresholds[:,t:t+Nu], computed_daily_virtual_recharge, model_daily_load_sf[:,floor(Int,t/(24/simulation_timestep_hours))+1:floor(Int,t/(24/simulation_timestep_hours)) + update_time_days], model_real_wallet[t:t+Nu], model_virtual_wallet[t:t+Nu], model_virtual_enable[:,t:t+Nu], model_real_enable[:,t:t+Nu], model_actuation_state[:,t:t+Nu], model_demand_state[:,t:t+Nu], model_virtual_wallet_thresholds[:,floor(Int,t/(24/simulation_timestep_hours))+1:floor(Int,t/(24/simulation_timestep_hours)) + update_time_days], solve_time_model = compute_virtualrecharge_thresholds(time_data, demand_data, real_wallet_data, virtual_wallet_data, directory);                    
                 elseif model_number == 3
                     virtual_wallet_thresholds[:,t:t+Nu], model_real_wallet[t:t+Nu], model_virtual_wallet[t:t+Nu], model_virtual_enable[:,t:t+Nu], model_real_enable[:,t:t+Nu], model_actuation_state[:,t:t+Nu], model_demand_state[:,t:t+Nu], model_virtual_wallet_thresholds[:,floor(Int,t/(24/simulation_timestep_hours))+1:floor(Int,t/(24/simulation_timestep_hours)) + update_time_days], computed_daily_virtual_recharge = compute_thresholds_extra_constraints(time_data, demand_data, real_wallet_data, virtual_wallet_data);
+                elseif model_number == 4
+                    virtual_wallet_thresholds[:,t:t+Nu], computed_daily_virtual_recharge, model_daily_load_sf[:,floor(Int,t/(24/simulation_timestep_hours))+1:floor(Int,t/(24/simulation_timestep_hours)) + update_time_days], model_real_wallet[t:t+Nu], model_virtual_wallet[t:t+Nu], model_virtual_enable[:,t:t+Nu], model_real_enable[:,t:t+Nu], model_actuation_state[:,t:t+Nu], model_demand_state[:,t:t+Nu], model_virtual_wallet_thresholds[:,floor(Int,t/(24/simulation_timestep_hours))+1:floor(Int,t/(24/simulation_timestep_hours)) + update_time_days], solve_time_model = compute_enable_durations(time_data, demand_data, real_wallet_data, virtual_wallet_data, directory)
                 end
             end
         # case = 1 -> fixed thresholds
@@ -340,7 +344,7 @@ function run_threshold_model_simulation(experiment_parameters)
         # Update wallet
         # Daily recharge and daily costs
         if t in day_start_timesteps
-            if ((model_number == 1) || (model_number == 3))  && (case == 2)
+            if ((model_number == 1) || (model_number == 3) || (model_number == 4))  && (case == 2)
                 day_index = floor(Int,1 + (t)*simulation_timestep_hours/24)
                 update_window_index = mod(day_index,update_time_days)
                 if update_window_index == 0

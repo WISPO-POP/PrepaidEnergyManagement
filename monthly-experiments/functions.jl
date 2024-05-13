@@ -198,6 +198,7 @@ function compute_daily_virtual_update(number_of_days, recharge_cost_schedule)
     return daily_update
 end
 
+# DFM (Detailed Forecast MILP) model
 function compute_thresholds(time_data, demand_data, real_wallet_data, virtual_wallet_data)
     model = Model(Gurobi.Optimizer)
     number_of_timesteps = floor(Int,time_data["number_of_days"]*24/time_data["timestep_hours"]);
@@ -312,6 +313,7 @@ function compute_thresholds(time_data, demand_data, real_wallet_data, virtual_wa
 
 end
 
+# Average forecast model (using a solver to solve linear optimization problem)
 function compute_virtualrecharge_thresholds(time_data, demand_data, real_wallet_data, virtual_wallet_data, directory)
     model = Model(Gurobi.Optimizer)
     number_of_loads = demand_data["number_of_loads"];
@@ -442,6 +444,116 @@ function compute_virtualrecharge_thresholds(time_data, demand_data, real_wallet_
     end
      
     return virtual_wallet_thresholds_updatewindow, daily_virtual_recharge_updatewindow, daily_load_sf, zeros(1:update_number_of_timesteps), zeros(1:update_number_of_timesteps), zeros(1:number_of_loads,1:update_number_of_timesteps), zeros(1:number_of_loads,1:update_number_of_timesteps), zeros(1:number_of_loads,1:update_number_of_timesteps), demand_data["demand_state"][:,1:update_number_of_timesteps], virtual_wallet_thresholds[:,1:time_data["update_time_days"]], solve_time_model
+
+end
+
+# AFG (Average Forecast Greedy) model
+function compute_enable_durations(time_data, demand_data, real_wallet_data, virtual_wallet_data, directory)
+    number_of_loads = demand_data["number_of_loads"];
+    number_of_days = time_data["number_of_days"];
+    number_of_timesteps = floor(Int,time_data["number_of_days"]*24/time_data["timestep_hours"]);
+    timestep_hours = time_data["timestep_hours"];
+    update_number_of_timesteps = floor(Int,time_data["update_time_days"]*24/timestep_hours);    
+    day_start_timesteps = zeros(Int,time_data["number_of_days"],1);
+    for i in 1:time_data["number_of_days"]
+        day_start_timesteps[i] = floor(Int,(24/timestep_hours)*(i-1) + 1);
+    end    
+    daily_virtual_recharge_updatewindow = zeros(1,time_data["update_time_days"])
+    daily_real_recharge = real_wallet_data["daily_real_recharge"]
+    recharge_days = findall(x -> x!=0, daily_real_recharge)      
+    load_priority_factor = demand_data["load_priority_factor"];
+    demand_avg_power_W = zeros(number_of_loads,number_of_days);
+    enable_duration_max = zeros(number_of_loads,number_of_days); 
+    # max duration for which loads are to be enabled 
+    # = 24h if average power demand is non-zero on that day, else = 0
+    for d = 1:number_of_days
+        timestep = day_start_timesteps[d];
+        demand_avg_power_W[:,d] = demand_data["demand_power_W"][:,timestep];
+        for k = 1:number_of_loads
+            if demand_avg_power_W[k,d] > 0
+                enable_duration_max[k,d] = 24;
+            end
+        end
+    end
+
+    # Calculate enable durations using greedy approach
+    enable_duration = zeros(number_of_loads,number_of_days)
+    benefit_per_unit_power = zeros(number_of_loads,number_of_days)    
+    for k in 1:number_of_loads
+        for d in 1:number_of_days
+            if demand_avg_power_W[k,d] > 0
+                benefit_per_unit_power[k,d] = load_priority_factor[k]/(sum(enable_duration_max[k,day] for day in 1:number_of_days)*demand_avg_power_W[k,d])
+            end
+        end
+    end
+    enable_duration_max_flat = vec(enable_duration_max)
+    enable_duration_flat = vec(enable_duration)
+    demand_avg_power_W_flat = vec(demand_avg_power_W)
+    benefit_per_unit_power_flat = vec(benefit_per_unit_power)
+    descending_bpup_indices = sortperm(benefit_per_unit_power_flat,rev=true)
+    tolerance = 1e-4
+    for index in descending_bpup_indices
+        enable_duration_flat[index] = enable_duration_max_flat[index]
+        if ((real_wallet_data["cost_perkWh"]/1000)*sum(enable_duration_flat[i]*demand_avg_power_W_flat[i] for i in descending_bpup_indices) >= (sum(daily_real_recharge)-tolerance))
+            enable_duration_flat[index] = 0
+            enable_duration_flat[index] = (((sum(daily_real_recharge)-tolerance)/(real_wallet_data["cost_perkWh"]/1000))-sum(enable_duration_flat[i]*demand_avg_power_W_flat[i] for i in descending_bpup_indices))/demand_avg_power_W_flat[index]
+            print("enable_duration_flat[index] = ")
+            println(enable_duration_flat[index])
+            break
+        end
+    end
+    enable_duration = reshape(enable_duration_flat, (number_of_loads,number_of_days))
+    
+    model_psf = sum((load_priority_factor[k]/sum(enable_duration_max[k,day] for day in 1:number_of_days))*sum(enable_duration[k,day] for day in 1:number_of_days) for k in 1:number_of_loads)
+
+    # Calculate daily virtual recharge
+    daily_virtual_recharge = zeros(number_of_days)
+    for d in 1:number_of_days
+        daily_virtual_recharge[d] = sum(enable_duration[k,d]*demand_avg_power_W[k,d] for k in 1:number_of_loads)*(real_wallet_data["cost_perkWh"]/1000)
+    end
+    column_names = ["daily_virtual_recharge"]
+    daily_virtual_recharge_df = DataFrame([daily_virtual_recharge], column_names)
+
+    # Calculate virtual wallet thresholds
+    virtual_wallet_thresholds = zeros(number_of_loads,number_of_days)
+    for d = 1:number_of_days
+        always_enabled_load_indices = findall(x -> x!=0, vec(enable_duration[:,d]))
+        for k = 1:number_of_loads
+            if enable_duration[k,d] == 0
+                virtual_wallet_thresholds[k,d] = 0.0001+daily_virtual_recharge[d]
+            elseif enable_duration[k,d] == enable_duration_max[k,d]
+                virtual_wallet_thresholds[k,d] = 0
+            else
+                virtual_wallet_thresholds[k,d] = daily_virtual_recharge[d] - enable_duration[k,d]*(real_wallet_data["cost_perkWh"]/1000)*sum(demand_avg_power_W[k,d] for k in always_enabled_load_indices)
+            end
+        end 
+    end
+        
+    # extract virtual recharge and thresholds for update window
+    virtual_wallet_thresholds_updatewindow = zeros(number_of_loads,update_number_of_timesteps)
+    daily_virtual_recharge_updatewindow = daily_virtual_recharge[1:time_data["update_time_days"]];
+    for t in 1:update_number_of_timesteps
+        if mod(t,24/timestep_hours) == 0
+            day_index = floor(Int,div(t,24/timestep_hours));
+        else
+            day_index = floor(Int,div(t,24/timestep_hours))+1;
+        end
+        virtual_wallet_thresholds_updatewindow[:,t] = value.(virtual_wallet_thresholds[:,day_index])
+    end
+
+    daily_load_sf = zeros(number_of_loads,time_data["update_time_days"])
+    for d = 1:time_data["update_time_days"]
+        for k = 1:number_of_loads
+            if enable_duration_max[k,d] == 0
+                daily_load_sf[k,d] = -1
+            else
+                daily_load_sf[k,d] = 100*value.(enable_duration[k,d])/enable_duration_max[k,d]
+            end
+        end
+    end
+    solve_time_model = -1 
+    
+    return virtual_wallet_thresholds_updatewindow, daily_virtual_recharge_updatewindow, daily_load_sf, zeros(1:update_number_of_timesteps), zeros(1:update_number_of_timesteps), zeros(1:number_of_loads,1:update_number_of_timesteps), zeros(1:number_of_loads,1:update_number_of_timesteps), zeros(1:number_of_loads,1:update_number_of_timesteps), demand_data["demand_state"][:,1:update_number_of_timesteps], virtual_wallet_thresholds[:,1:time_data["update_time_days"]], solve_time_model    
 
 end
 
@@ -634,6 +746,7 @@ function generate_modified_data(demand_power_W,demand_state,number_of_timesteps,
     return demand_power_W_modified, demand_state_modified, daily_energy_array_Wh_modified, daily_energy_Wh_modified
 end
 
+# OBM (Optimal Benchmark MILP) model
 function compute_hem_schedule(total_time_days, timestep_hours, demand_state, demand_power_W, cost_perkWh, number_of_loads, load_priority_factor, daily_real_recharge, directory)
     number_of_timesteps = floor(Int,total_time_days*24/timestep_hours)   
     model = Model(Gurobi.Optimizer)
@@ -678,128 +791,4 @@ function compute_hem_schedule(total_time_days, timestep_hours, demand_state, dem
 end
 
 
-function compute_thresholds_extra_constraints(time_data, demand_data, real_wallet_data, virtual_wallet_data)
-    model = Model(Gurobi.Optimizer)
-    number_of_timesteps = floor(Int,time_data["number_of_days"]*24/time_data["timestep_hours"]);
-    timestep_hours = time_data["timestep_hours"];
-    day_start_timesteps = zeros(Int,time_data["number_of_days"],1);
-    load_priority_factor = demand_data["load_priority_factor"];
-    for i in 1:time_data["number_of_days"]
-        day_start_timesteps[i] = floor(Int,(24/timestep_hours)*(i-1) + 1);
-    end
-    # Add Variables
-    @variable(model, 0 <= actuation_state[k in 1:demand_data["number_of_loads"], t in 1:number_of_timesteps] <= 1, Int);
-    @variable(model, real_wallet[t in 1:(number_of_timesteps+1)]);
-    @variable(model, 0 <= real_enable[k in 1:demand_data["number_of_loads"], t in 1:(number_of_timesteps+1)] <= 1, Int);
-    @variable(model, 0 <= virtual_enable[k in 1:demand_data["number_of_loads"], t in 1:number_of_timesteps] <= 1, Int); 
-    @variable(model, 0 <= virtual_wallet[t in 1:number_of_timesteps]);
-    @variable(model, virtual_wallet_thresholds[k in 1:demand_data["number_of_loads"], i in 1:time_data["number_of_days"]]);    
-    @variable(model, daily_virtual_recharge[d in 1:time_data["number_of_days"]])
-
-    # Add Constraints
-    m = -10000;
-    M = 10000;
-    epsilon = 1e-6;
-    # Real Wallet update constraint
-    real_recharge_schedule_index = 0
-    @constraint(model, real_wallet[1] == real_wallet_data["real_wallet_balance"] + real_wallet_data["daily_real_recharge"][1] - real_wallet_data["daily_real_cost"][1]);
-    for t in 2:number_of_timesteps+1
-        tm1 = t-1;
-        recharge = 0;
-        cost = 0;
-        if t in day_start_timesteps
-            recharge = real_wallet_data["daily_real_recharge"][floor(Int,1 + (t - 1)*timestep_hours/24)];
-            cost = real_wallet_data["daily_real_cost"][floor(Int,1 + (t - 1)*timestep_hours/24)];
-        end
-        @constraint(model, real_wallet[t] == real_wallet[tm1] + (timestep_hours*real_wallet_data["cost_perkWh"]/1000)*(- sum(demand_data["demand_power_W"][k,tm1]*actuation_state[k,tm1] for k in 1:demand_data["number_of_loads"])) + recharge - cost);
-    end
-    # Real wallet enable signal constraints
-    for t in 1:number_of_timesteps+1
-        for k in 1:demand_data["number_of_loads"]
-            @constraint(model, m*real_enable[k,t] <= -real_wallet[t]);
-            @constraint(model, (M+epsilon)*(1-real_enable[k,t]) >= epsilon-real_wallet[t]);
-        end
-    end
-    # Virtual wallet update constraints
-    @constraint(model, virtual_wallet[1] == virtual_wallet_data["virtual_wallet_balance"] + daily_virtual_recharge[1]);
-    for iDays = 1:time_data["number_of_days"]
-        for t in round(Int,(iDays-1)*24/timestep_hours + 2):round(Int,(iDays)*24/timestep_hours)
-            tm1 = t-1;
-            @constraint(model, virtual_wallet[t] == virtual_wallet[tm1] + (timestep_hours*real_wallet_data["cost_perkWh"]/1000)*(- sum(demand_data["demand_power_W"][k,tm1]*actuation_state[k,tm1] for k in 1:demand_data["number_of_loads"])));
-        end
-        if iDays >= 2
-            tnp1 = round(Int, 1 + (iDays-1)*24/timestep_hours);
-            tnp = round(Int, (iDays-1)*24/timestep_hours);
-            @constraint(model, virtual_wallet[tnp1] == virtual_wallet[tnp] + daily_virtual_recharge[iDays] + (timestep_hours*real_wallet_data["cost_perkWh"]/1000)*(- sum(demand_data["demand_power_W"][k,tnp]*actuation_state[k,tnp] for k in 1:demand_data["number_of_loads"])));
-        end
-    end
-    recharge_days = findall(x -> x!=0, real_wallet_data["daily_real_recharge"])    
-    # upper bound on virtual wallet recharge
-    @constraint(model, virtual_wallet_data["virtual_wallet_balance"] + sum(daily_virtual_recharge[d] for d in 1:time_data["number_of_days"]) <= real_wallet_data["real_wallet_balance"] + sum(real_wallet_data["daily_real_recharge"]))
-    # the following for loop can be omitted if recharge frequency is 1
-    # the constraints in the loop assume that there will be a real wallet recharge on day 1    
-    for i = 1:length(recharge_days)-1
-        @constraint(model, virtual_wallet_data["virtual_wallet_balance"] + sum(daily_virtual_recharge[d] for d in 1:recharge_days[i+1]-1) <= real_wallet_data["real_wallet_balance"] + sum(real_wallet_data["daily_real_recharge"][recharge_days[j]] for j in 1:i))
-    end
-
-
-
-    # Virtual wallet enable constraints
-    for t in 1:number_of_timesteps
-        if mod(t,24/timestep_hours) == 0
-            i = floor(Int,div(t,24/timestep_hours));
-        else
-            i = floor(Int,div(t,24/timestep_hours)) + 1;
-        end
-        for k in 1:demand_data["number_of_loads"]
-            @constraint(model, virtual_wallet[t] - virtual_wallet_thresholds[k,i] - (M + epsilon)*virtual_enable[k,t] <= -epsilon);
-            @constraint(model, virtual_wallet[t] - virtual_wallet_thresholds[k,i] -m*(1 - virtual_enable[k,t]) >= 0);
-        end
-    end
-    # Actuation state constraints
-    for t in 1:number_of_timesteps    
-        for k in 1:demand_data["number_of_loads"]
-            @constraint(model, actuation_state[k,t] <= demand_data["demand_state"][k,t]*virtual_enable[k,t]);
-            @constraint(model, actuation_state[k,t] <= real_enable[k,t]);
-            tp1 = t + 1;
-            @constraint(model, actuation_state[k,t] <= real_enable[k,tp1])
-            @constraint(model, demand_data["demand_state"][k,t]*virtual_enable[k,t] + real_enable[k,t] + real_enable[k,tp1] <= 2 + actuation_state[k,t]);
-        end
-    end  
-
-    # Constraints for when thresholds have to be the same across more than 1 day
-    if virtual_wallet_data["threshold_constant_days"] > 1
-        for k in 1:demand_data["number_of_loads"]
-            for j = 1:virtual_wallet_data["threshold_constant_days"]:time_data["number_of_days"]
-                for i = j:j+(virtual_wallet_data["threshold_constant_days"]-2)
-                    if i < time_data["number_of_days"]
-                        @constraint(model, virtual_wallet_thresholds[k,i] == virtual_wallet_thresholds[k,i+1])
-                    end
-                end
-            end
-        end
-    end 
-
-    # Objective function
-    @objective(model, Max, sum(load_priority_factor[k]*(sum(actuation_state[k,t] for t in 1:number_of_timesteps)/(sum(demand_data["demand_state"][k,t] for t in 1:number_of_timesteps)+0.0001)) for k in 1:demand_data["number_of_loads"]))
-
-    # Solve model
-    #set_optimizer_attribute(model, "LogToConsole", 0)                        
-    optimize!(model)
-
-    # Extract thresholds for days in update window
-    update_number_of_timesteps = floor(Int,time_data["update_time_days"]*24/timestep_hours);
-    virtual_wallet_thresholds_updatewindow = zeros(demand_data["number_of_loads"],update_number_of_timesteps);
-    for t in 1:update_number_of_timesteps
-        if mod(t,24/timestep_hours) == 0
-            day_index = floor(Int,div(t,24/timestep_hours));
-        else
-            day_index = floor(Int,div(t,24/timestep_hours))+1;
-        end
-        virtual_wallet_thresholds_updatewindow[:,t] = value.(virtual_wallet_thresholds[:,day_index])
-    end     
-    daily_virtual_recharge_updatewindow = value.(daily_virtual_recharge[1:time_data["update_time_days"]]);
-    return virtual_wallet_thresholds_updatewindow, value.(real_wallet[1:update_number_of_timesteps]), value.(virtual_wallet[1:update_number_of_timesteps]), value.(virtual_enable[:,1:update_number_of_timesteps]), value.(real_enable[:,1:update_number_of_timesteps]), value.(actuation_state[:,1:update_number_of_timesteps]), demand_data["demand_state"][:,1:update_number_of_timesteps], value.(virtual_wallet_thresholds[:,1:time_data["update_time_days"]]), daily_virtual_recharge_updatewindow
-
-end
 
