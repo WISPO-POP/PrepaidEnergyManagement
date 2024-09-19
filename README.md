@@ -8,7 +8,17 @@ University of Wisconsin-Madison
 * monthly-experiments - to run experiments with simulation durations as a multiple of 1 month. Residential electricity usage data can be obtained from [Pecan Street Dataport](https://www.pecanstreet.org/dataport/licenses/). 
 * In each folder, run the file _main.jl_, supporting functions are present in _functions.jl_.
 
-Link and citation for our publication:
+Links and citations for our publications:   
+[Energy Management for Prepaid Customers: A Linear Optimization Approach](https://arxiv.org/abs/2408.14703)
+```
+@article{marathe2024energy,
+  title={Energy Management for Prepaid Customers: A Linear Optimization Approach},
+  author={Marathe, Maitreyee and Roald, Line A},
+  journal={arXiv preprint arXiv:2408.14703},
+  year={2024}
+}
+```
+
 [Optimal Energy Rationing for Prepaid Electricity Customers](https://ieeexplore.ieee.org/abstract/document/10202907)   
 
 ```
